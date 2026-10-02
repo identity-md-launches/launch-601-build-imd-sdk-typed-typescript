@@ -1,7 +1,7 @@
 // @ts-check
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, hostname } from 'node:os';
+import { lstat, mkdir, readdir, readFile, rename, rm, rmdir, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { LocalPrivateKeySigner, sha256, toHex } from './crypto.js';
 
@@ -11,6 +11,10 @@ export const IMD_TOKEN = '0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7';
 export const PERMIT2 = '0x000000000022d473030f116ddee9f6b43ac78ba3';
 export const X402_PERMIT2_PROXY = '0x402085c248eea27d92e8b30b2c58ed07f9e20001';
 const NETWORK = 'eip155:1', SCHEME = 'exact', TRANSFER_METHOD = 'permit2', MAX_TIMEOUT_SECONDS = 86400;
+/** Lock lease: a holder refreshes its owner file every LOCK_REFRESH_MS; a lock is stale only after LOCK_STALE_MS without a refresh and with no live holder pid on this host. */
+const LOCK_WAIT_MS = 15000, LOCK_STALE_MS = 60000, LOCK_REFRESH_MS = 5000;
+/** A saved authorization is treated as live this long past its Permit2 deadline, covering clock skew against block.timestamp. */
+const DEADLINE_GRACE_SECONDS = 30;
 const pending = new Set(['quoted','payment_pending','admission_pending']);
 /** Order states in which the service already holds a payment for the order: never sign another one. */
 const settled = new Set(['payment_pending','admission_pending','admitted','paid']);
@@ -29,8 +33,41 @@ const nowSeconds=()=>Math.floor(Date.now()/1000);
 function paymentOf(v) { return v?.payment || v?.price || v; }
 /** Saved quotes arrive flat or nested (quote response, status response, bare quote); normalize before comparing (finding 3). */
 function normalizeQuote(v) { const q=v?.quote||v?.order?.quote||(v?.id&&v?.quoteHash?v:undefined);if(!q)return undefined;const p=q.payment||q.price||(q.asset&&q.amount&&q.payTo?{network:q.network,asset:q.asset,amount:q.amount,payTo:q.payTo}:undefined);if(!p)return undefined;return {...q,payment:p}; }
-/** Exclusive cross-process lock: O_EXCL lock file, bounded wait, stale locks broken (findings 1, 2). */
-async function acquireLock(path,timeoutMs=15000,staleMs=60000) { const start=Date.now();for(;;){try{const fh=await open(path,'wx',0o600);await fh.writeFile(String(process.pid));await fh.close();return ()=>rm(path,{force:true});}catch(e){if(e.code!=='EEXIST')throw e;try{const s=await stat(path);if(Date.now()-s.mtimeMs>staleMs){await rm(path,{force:true});continue;}}catch{}if(Date.now()-start>timeoutMs)throw new Error(`could not acquire ${basename(path)}; another imd process holds it`);await sleep(20+Math.random()*40);}} }
+/** Whether the pid in an owner file name is alive on this host; undefined when the lock was taken on another host. */
+function ownerAlive(name,host) { const m=/^owner-(\d+)-/.exec(name);if(!m||host!==hostname())return undefined;try{process.kill(Number(m[1]),0);return true;}catch(e){return e?.code!=='ESRCH';} }
+/**
+ * Exclusive cross-process lock, bounded wait (findings 1, 2 and their review).
+ * The lock is a directory holding one `owner-<pid>-<random>` file (content: hostname), moved into place by a single
+ * rename, so acquisition is atomic. The holder refreshes the owner file's mtime every LOCK_REFRESH_MS; a lock is stale only
+ * when that mtime is older than LOCK_STALE_MS and the owner pid is not alive on this host. Breaking a stale lock unlinks the
+ * owner file by its exact name and removes the directory only while it is empty, and the holder's release does the same, so
+ * no process can ever remove a lock another process holds. A pre-0.1.1 plain lock file is honoured and broken by mtime only.
+ */
+async function acquireLock(path,timeoutMs=LOCK_WAIT_MS,staleMs=LOCK_STALE_MS) {
+  const name=`owner-${process.pid}-${randomBytes(6).toString('hex')}`, owner=join(path,name), tmp=`${path}.${name}.tmp`;
+  await mkdir(tmp,{mode:0o700});await writeFile(join(tmp,name),hostname(),{mode:0o600});
+  const start=Date.now();
+  try{
+    for(;;){
+      try{await rename(tmp,path);break;}catch(e){if(!['EEXIST','ENOTEMPTY','ENOTDIR','EISDIR'].includes(e?.code))throw e;}
+      let s;try{s=await lstat(path);}catch(e){if(e?.code==='ENOENT')continue;throw e;}
+      if(s.isDirectory()){
+        const owners=(await readdir(path).catch(()=>[])).filter(f=>f.startsWith('owner-'));
+        let stale=owners.length===0;
+        for(const f of owners){const os=await stat(join(path,f)).catch(()=>undefined);if(!os)continue;const host=await readFile(join(path,f),'utf8').catch(()=>'');if(Date.now()-os.mtimeMs>staleMs&&ownerAlive(f,host)!==true){await unlink(join(path,f)).catch(()=>{});stale=true;}}
+        if(stale){await rmdir(path).catch(()=>{});continue;}
+      } else if(Date.now()-s.mtimeMs>staleMs){await unlink(path).catch(()=>{});continue;}
+      if(Date.now()-start>timeoutMs)throw new Error(`could not acquire ${basename(path)}; another imd process holds it`);
+      await sleep(20+Math.random()*40);
+    }
+  }catch(e){await rm(tmp,{recursive:true,force:true});throw e;}
+  const lease=setInterval(()=>{const t=new Date();utimes(owner,t,t).catch(()=>{});},LOCK_REFRESH_MS);lease.unref();
+  return {
+    /** Throws when this process no longer holds the lock; called before anything irreversible. */
+    async check() { try{await stat(owner);}catch{throw new Error(`lost ${basename(path)} to another imd process; refusing to continue`);} },
+    async release() { clearInterval(lease);await unlink(owner).catch(()=>{});await rmdir(path).catch(()=>{}); },
+  };
+}
 /** Atomic replace: temp file (0600) then rename (finding 2). */
 async function writeAtomic(path,text) { const tmp=`${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;await writeFile(tmp,text,{mode:0o600});await rename(tmp,path); }
 /** @param {unknown} body @param {number} status */
@@ -105,13 +142,19 @@ export class ImdClient {
   /** Read-check-write of the ledger under an in-process mutex and an exclusive lock file; `delta` < 0 releases (findings 2, 4). @param {string} day @param {bigint} delta */
   async adjustSpend(day,delta) {
     let release;const previous=reservationQueue;reservationQueue=new Promise(resolve=>{release=resolve;});await previous;
-    try{await mkdir(dirname(this.spendFile),{recursive:true,mode:0o700});const unlock=await acquireLock(`${this.spendFile}.lock`);
-      try{const ledger=await this.readLedger();const spent=BigInt(ledger[day]||0);if(delta>0n&&spent+delta>this.maxPerDay)throw new Error('daily IMD spending cap exceeded');const next=spent+delta<0n?0n:spent+delta;ledger[day]=next.toString();await writeAtomic(this.spendFile,JSON.stringify(ledger));}
-      finally{await unlock();}}
+    try{await mkdir(dirname(this.spendFile),{recursive:true,mode:0o700});const lock=await acquireLock(`${this.spendFile}.lock`);
+      try{const ledger=await this.readLedger();const spent=BigInt(ledger[day]||0);if(delta>0n&&spent+delta>this.maxPerDay)throw new Error('daily IMD spending cap exceeded');const next=spent+delta<0n?0n:spent+delta;ledger[day]=next.toString();await lock.check();await writeAtomic(this.spendFile,JSON.stringify(ledger));}
+      finally{await lock.release();}}
     finally{release();}
   }
   authorizationFile(id) { return join(dirname(this.spendFile),`order-${createHash('sha256').update(String(id)).digest('hex').slice(0,32)}.json`); }
-  /** @param {string} id */ async readAuthorization(id) { try{const saved=JSON.parse(await readFile(this.authorizationFile(id),'utf8'));return saved&&saved.order===id&&typeof saved.header==='string'&&typeof saved.quoteSignature==='string'?saved:undefined;}catch(e){if(e?.code==='ENOENT')return undefined;throw new Error('saved payment authorization unreadable; refusing to sign');} }
+  /** The saved file is the only record that an authorization left the process: anything but a complete, well-formed record fails closed (review of finding 1). @param {string} id */
+  async readAuthorization(id) {
+    let text;try{text=await readFile(this.authorizationFile(id),'utf8');}catch(e){if(e?.code==='ENOENT')return undefined;throw new Error('saved payment authorization unreadable; refusing to sign');}
+    let saved;try{saved=JSON.parse(text);}catch{throw new Error('saved payment authorization corrupt; refusing to sign');}
+    if(!saved||typeof saved!=='object'||Array.isArray(saved)||saved.order!==id||typeof saved.day!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(saved.day)||!isAmount(saved.amount)||!isAmount(saved.deadline)||typeof saved.header!=='string'||!saved.header||typeof saved.quoteSignature!=='string'||!saved.quoteSignature)throw new Error('saved payment authorization corrupt; refusing to sign');
+    return saved;
+  }
   async submitSigned(id,saved) { return this.request(`/requests/${encodeURIComponent(id)}/submit`,{method:'POST',headers:{...this.headers(true),'PAYMENT-SIGNATURE':saved.header},body:JSON.stringify({quoteSignature:saved.quoteSignature})},[200,202]); }
   /** Challenge, validate and (only with execute:true) sign and submit a payment. A viem account is accepted directly as signer. @param {string|{id:string}} order @param {Signer} [signer] @param {{execute?:boolean}} [options] */
   async pay(order,signer=this.signer,options={}) {
@@ -120,17 +163,18 @@ export class ImdClient {
     if(!signer)throw new Error('a viem-compatible signer is required for execute:true');
     // Finding 1: one payment flow per order at a time, in this process and across processes.
     const previous=orderQueues.get(id)||Promise.resolve();let done;const mine=new Promise(resolve=>{done=resolve;});const chained=previous.then(()=>mine);orderQueues.set(id,chained);await previous;
-    try{await mkdir(dirname(this.spendFile),{recursive:true,mode:0o700});const unlock=await acquireLock(`${this.authorizationFile(id)}.lock`);try{return await this.execute(id,first.body,signer);}finally{await unlock();}}
+    try{await mkdir(dirname(this.spendFile),{recursive:true,mode:0o700});const lock=await acquireLock(`${this.authorizationFile(id)}.lock`);try{return await this.execute(id,first.body,signer,lock);}finally{await lock.release();}}
     finally{done();if(orderQueues.get(id)===chained)orderQueues.delete(id);}
   }
-  /** @param {string} id @param {Signer} signer */
-  async execute(id,ch,signer) {
+  /** @param {string} id @param {Signer} signer @param {{check:()=>Promise<void>}} lock the held per-order lock */
+  async execute(id,ch,signer,lock) {
     const saved=await this.readAuthorization(id);
     // Finding 1: reconcile with GET /requests/{id} before reusing or ever replacing an authorization.
     const current=await this.status(id);
     if(settled.has(current?.status))return current;
     if(saved){
-      if(nowSeconds()<Number(saved.deadline)){
+      // The saved authorization stays live for DEADLINE_GRACE_SECONDS past its deadline: the chain's clock may trail this one.
+      if(nowSeconds()<Number(saved.deadline)+DEADLINE_GRACE_SECONDS){
         if(current?.status==='payment_failed')throw new Error(`a previous payment authorization for this order is valid until ${saved.deadline}; refusing to sign a second one before it expires`);
         return (await this.submitSigned(id,saved)).body;
       }
@@ -144,6 +188,10 @@ export class ImdClient {
     const permit={domain:{name:'Permit2',chainId:1,verifyingContract:PERMIT2},primaryType:'PermitWitnessTransferFrom',types:{PermitWitnessTransferFrom:[{name:'permitted',type:'TokenPermissions'},{name:'spender',type:'address'},{name:'nonce',type:'uint256'},{name:'deadline',type:'uint256'},{name:'witness',type:'Witness'}],TokenPermissions:[{name:'token',type:'address'},{name:'amount',type:'uint256'}],Witness:[{name:'to',type:'address'},{name:'validAfter',type:'uint256'}]},message:{permitted:{token:terms.accepted.asset,amount:terms.amount},spender:X402_PERMIT2_PROXY,nonce,deadline,witness:{to:terms.accepted.payTo,validAfter:0n}}};
     const paymentFor=(signature)=>({x402Version:2,resource:ch.resource,accepted:terms.accepted,payload:{signature,permit2Authorization:authorization}});
     canon(paymentFor('0x'));
+    // Review of finding 1: the calls above may have been slow. Before anything irreversible, confirm this process still holds
+    // the order lock and that no authorization for this order was saved meanwhile.
+    await lock.check();
+    if(await this.readAuthorization(id))throw new Error('a payment authorization for this order was saved while this process was working; refusing to sign a second one');
     // Finding 4: budget is reserved only after every signing input is valid.
     await this.adjustSpend(terms.key,terms.amount);
     let signature,quoteSignature,payment,header;
