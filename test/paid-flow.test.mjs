@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
-import { ImdClient, LocalPrivateKeySigner } from '../src/index.js';
+
+// The spend ledger and saved authorizations live under XDG_STATE_HOME; keep the suite out of the real one.
+process.env.XDG_STATE_HOME = mkdtempSync(join(tmpdir(), 'imd-sdk-test-'));
+const { ImdClient, LocalPrivateKeySigner } = await import('../src/index.js');
 
 const KEY='0x59c6995e998f97a5a0044976f0945389dc9e86dae88c7a8412c8b4f11f99f37b';
 const ASSET='0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7';
@@ -27,7 +33,7 @@ async function mock() {
     const send=(status,value)=>{res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(value));};
     assert.match(req.headers.authorization||'',/^Bearer [0-9a-f]{64}$/);
     let raw='';for await(const part of req)raw+=part;
-    if(req.method==='POST'&&req.url==='/requests/quote'){const v=JSON.parse(raw);assert.equal(v.action,'job.open');assert.match(v.requestKey,/^[0-9a-f-]{36}$/);return send(200,{order:{id:'order-1'}});}
+    if(req.method==='POST'&&req.url==='/requests/quote'){const v=JSON.parse(raw);assert.equal(v.action,'job.open');assert.match(v.requestKey,/^[0-9a-f-]{36}$/);return send(201,{created:true,order:{id:'order-1',status:'quoted',quote}});}
     if(req.method==='GET'&&req.url==='/requests/capabilities')return send(200,{actions:[{action:'job.open',payment:quote.payment}]});
     if(req.method==='POST'&&req.url==='/requests/order-1/submit'&&!raw){challenges++;return send(402,challenge);}
     if(req.method==='POST'&&req.url==='/requests/order-1/submit'){
@@ -38,7 +44,7 @@ async function mock() {
       assert.match(payment.payload.signature,/^0x[0-9a-f]{130}$/);assert.match(JSON.parse(raw).quoteSignature,/^0x[0-9a-f]{130}$/);
       submitted={payment,quoteSignature:JSON.parse(raw).quoteSignature};return send(202,{status:'payment_pending',order:{id:'order-1'}});
     }
-    if(req.method==='GET'&&req.url==='/requests/order-1'){polls++;return send(200,polls===1?{status:'payment_pending'}:{status:'admitted',admission:{result:{jobId:'job-1'}}});}
+    if(req.method==='GET'&&req.url==='/requests/order-1'){if(!submitted)return send(200,{status:'quoted',order:{id:'order-1',status:'quoted',quote},payment:null,admission:null});polls++;return send(200,polls===1?{status:'payment_pending'}:{status:'admitted',admission:{result:{jobId:'job-1'}}});}
     return send(404,{error:'not_found'});
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));

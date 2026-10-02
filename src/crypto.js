@@ -56,15 +56,17 @@ const b32 = (n) => { const out=new Uint8Array(32);for(let i=31;i>=0;i--){out[i]=
 const num = (x) => typeof x === 'bigint' ? x : BigInt(x);
 const hmac = (key, data) => new Uint8Array(createHmac('sha256', key).update(data).digest());
 
+/** Validate and normalize a private key at every public boundary; the static error never contains key material (findings 10, 11). @param {unknown} privateKey */
+function normalizeKey(privateKey) { if(typeof privateKey!=='string'||!/^(0x)?[0-9a-fA-F]{64}$/.test(privateKey))throw new Error('invalid private key'); const d=BigInt(privateKey.startsWith('0x')?privateKey:`0x${privateKey}`); if(d<=0n||d>=N)throw new Error('invalid private key'); return d; }
 /** Deterministic RFC6979 secp256k1 signature with Ethereum recovery byte. @param {string} privateKey @param {Uint8Array} digest */
 export function signDigest(privateKey, digest) {
-  const d=num(privateKey); if(d<=0n||d>=N)throw new Error('invalid private key'); const z=BigInt(hex(digest));
+  const d=normalizeKey(privateKey); const z=BigInt(hex(digest));
   let k=new Uint8Array(32), v=new Uint8Array(32).fill(1); const x=b32(d), h=b32(z);
   k=hmac(k,concat(v,new Uint8Array([0]),x,h));v=hmac(k,v);k=hmac(k,concat(v,new Uint8Array([1]),x,h));v=hmac(k,v);
   for(;;){v=hmac(k,v);const nonce=BigInt(hex(v));if(nonce>0n&&nonce<N){const R=mul(nonce);const r=R[0]%N;if(r){let s=mod(inv(nonce,N)*(z+r*d),N);if(s){let rec=Number(R[1]&1n);if(s>N/2n){s=N-s;rec^=1;}return hex(concat(b32(r),b32(s),new Uint8Array([27+rec])));}}}k=hmac(k,concat(v,new Uint8Array([0])));v=hmac(k,v);}
 }
 /** @param {string} privateKey */
-export function addressFromPrivateKey(privateKey) { const Q=mul(num(privateKey)); return hex(keccak256(concat(b32(Q[0]),b32(Q[1]))).slice(12)).toLowerCase(); }
+export function addressFromPrivateKey(privateKey) { const Q=mul(normalizeKey(privateKey)); return hex(keccak256(concat(b32(Q[0]),b32(Q[1]))).slice(12)).toLowerCase(); }
 function deps(primary, types, seen=new Set()) { if(seen.has(primary))return [];seen.add(primary);return [primary,...Object.values(types[primary]||[]).flatMap(f=>types[f.type]?deps(f.type,types,seen):[])]; }
 function typeText(primary,types) { const d=deps(primary,types);return [primary,...d.filter(x=>x!==primary).sort()].map(n=>`${n}(${types[n].map(f=>`${f.type} ${f.name}`).join(',')})`).join(''); }
 function field(type, value, types) { if(types[type])return keccak256(encodeStruct(type,value,types)); if(type==='string')return keccak256(String(value));if(type==='bytes')return keccak256(unhex(value));if(type==='address'){const h=unhex(value);return concat(new Uint8Array(12),h);}if(/^bytes\d+$/.test(type)){const h=unhex(value);return concat(h,new Uint8Array(32-h.length));}if(/^u?int/.test(type))return b32(num(value));throw new Error(`unsupported EIP-712 type ${type}`); }
@@ -74,7 +76,7 @@ export function typedDataDigest(typed) { const fields=[];if(typed.domain.name!==
 /** A local key is intentionally opt-in; CLI reads it only from IMD_PRIVATE_KEY when executing. */
 export class LocalPrivateKeySigner {
   #privateKey;
-  /** @param {string} privateKey */ constructor(privateKey) { if(typeof privateKey!=='string'||! /^(0x)?[0-9a-fA-F]{64}$/.test(privateKey))throw new Error('invalid private key');this.#privateKey=privateKey.startsWith('0x')?privateKey:`0x${privateKey}`;this.address=addressFromPrivateKey(this.#privateKey); }
+  /** @param {string} privateKey */ constructor(privateKey) { const d=normalizeKey(privateKey);this.#privateKey=`0x${d.toString(16).padStart(64,'0')}`;this.address=addressFromPrivateKey(this.#privateKey); }
   /** @param {{domain:object,types:Record<string, {name:string,type:string}[]>,primaryType:string,message:object}} typed */ async signTypedData(typed) { return signDigest(this.#privateKey,typedDataDigest(typed)); }
 }
 export const toHex = hex;
