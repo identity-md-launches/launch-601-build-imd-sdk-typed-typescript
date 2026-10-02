@@ -10,7 +10,7 @@ const show=(v)=>console.log(json?JSON.stringify(v,null,2):typeof v==='string'?v:
 async function body(file) { return JSON.parse(await readFile(file,'utf8')); }
 try {
   const [command,arg]=clean; if(!command||['-h','--help','help'].includes(command)){console.log(help);process.exit(0);}
-  const client=new ImdClient({baseUrl:process.env.IMD_API,token:process.env.IMD_REQUEST_TOKEN});let out;
+  const client=new ImdClient({baseUrl:process.env.IMD_API,token:process.env.IMD_REQUEST_TOKEN,maxPerRequest:process.env.IMD_MAX_PER_REQUEST,maxPerDay:process.env.IMD_MAX_PER_DAY});let out;
   if(command==='capabilities')out=await client.capabilities();
   else if(command==='check'){const v=await body(arg);out=await client.check(v.action,v.input);}
   else if(command==='import')out=await client.importRepo(arg);

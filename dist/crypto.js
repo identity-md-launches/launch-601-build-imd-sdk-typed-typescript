@@ -73,7 +73,8 @@ function encodeStruct(primary,value,types) { return concat(keccak256(typeText(pr
 export function typedDataDigest(typed) { const fields=[];if(typed.domain.name!==undefined)fields.push({name:'name',type:'string'});if(typed.domain.version!==undefined)fields.push({name:'version',type:'string'});if(typed.domain.chainId!==undefined)fields.push({name:'chainId',type:'uint256'});if(typed.domain.verifyingContract!==undefined)fields.push({name:'verifyingContract',type:'address'});const types={...typed.types,EIP712Domain:fields};return keccak256(concat(new Uint8Array([0x19,1]),keccak256(encodeStruct('EIP712Domain',typed.domain,types)),keccak256(encodeStruct(typed.primaryType,typed.message,types)))); }
 /** A local key is intentionally opt-in; CLI reads it only from IMD_PRIVATE_KEY when executing. */
 export class LocalPrivateKeySigner {
-  /** @param {string} privateKey */ constructor(privateKey) { this.privateKey=privateKey.startsWith('0x')?privateKey:`0x${privateKey}`;this.address=addressFromPrivateKey(this.privateKey); }
-  /** @param {{domain:object,types:Record<string, {name:string,type:string}[]>,primaryType:string,message:object}} typed */ async signTypedData(typed) { return signDigest(this.privateKey,typedDataDigest(typed)); }
+  #privateKey;
+  /** @param {string} privateKey */ constructor(privateKey) { if(typeof privateKey!=='string'||! /^(0x)?[0-9a-fA-F]{64}$/.test(privateKey))throw new Error('invalid private key');this.#privateKey=privateKey.startsWith('0x')?privateKey:`0x${privateKey}`;this.address=addressFromPrivateKey(this.#privateKey); }
+  /** @param {{domain:object,types:Record<string, {name:string,type:string}[]>,primaryType:string,message:object}} typed */ async signTypedData(typed) { return signDigest(this.#privateKey,typedDataDigest(typed)); }
 }
 export const toHex = hex;

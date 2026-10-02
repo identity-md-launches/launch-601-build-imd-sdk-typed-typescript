@@ -1,14 +1,18 @@
 // @ts-check
 import { randomBytes, randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { LocalPrivateKeySigner, sha256, toHex } from './crypto.js';
 
 export { LocalPrivateKeySigner } from './crypto.js';
 export const API_URL = 'https://api.imd.fun';
 export const IMD_TOKEN = '0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7';
-export const PERMIT2 = '0x000000000022d473030f116dee9f6b43ac78ba3';
+export const PERMIT2 = '0x000000000022d473030f116ddee9f6b43ac78ba3';
 export const X402_PERMIT2_PROXY = '0x402085c248eea27d92e8b30b2c58ed07f9e20001';
 const pending = new Set(['quoted','payment_pending','admission_pending']);
 const daily = new Map();
+let reservationQueue = Promise.resolve();
 const canon = (v) => v===null?'null':Array.isArray(v)?`[${v.map(canon).join(',')}]`:typeof v==='object'?`{${Object.keys(v).sort().map(k=>`${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`:JSON.stringify(v);
 const eqAddress=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.toLowerCase()===b.toLowerCase();
 const b32=(v)=>v.startsWith('0x')?v:`0x${v}`;
@@ -21,7 +25,7 @@ export class ImdError extends Error { constructor(body,status) { super(body?.det
 /** @typedef {{baseUrl?:string, token?:string, signer?:Signer, maxPerRequest?:string|bigint, maxPerDay?:string|bigint, fetch?:typeof globalThis.fetch}} ImdClientOptions */
 export class ImdClient {
   /** @param {ImdClientOptions} [options] */
-  constructor(options={}) { this.baseUrl=(options.baseUrl||API_URL).replace(/\/$/,'');this.token=options.token||randomBytes(32).toString('hex');this.signer=options.signer;this.maxPerRequest=BigInt(options.maxPerRequest??'500000000000000000');this.maxPerDay=BigInt(options.maxPerDay??'500000000000000000');this.fetch=options.fetch||globalThis.fetch;this.quotes=new Map(); }
+  constructor(options={}) { this.baseUrl=(options.baseUrl||API_URL).replace(/\/$/,'');this.token=options.token||randomBytes(32).toString('hex');this.signer=options.signer;this.maxPerRequest=BigInt(options.maxPerRequest??'500000000000000000');this.maxPerDay=BigInt(options.maxPerDay??'500000000000000000');this.fetch=options.fetch||globalThis.fetch;this.quotes=new Map();this.spendFile=join(process.env.XDG_STATE_HOME||join(homedir(),'.local','state'),'imd-sdk','daily-spend.json'); }
   headers(json=false) { return {Authorization:`Bearer ${this.token}`,...(json?{'Content-Type':'application/json'}:{})}; }
   async request(path,init={},allow=[]) { const r=await this.fetch(`${this.baseUrl}${path}`,init);let body=null;const text=await r.text();try{body=text?JSON.parse(text):null;}catch{body=text;}if(!r.ok&&!allow.includes(r.status))throw new ImdError(body,r.status);return {status:r.status,body}; }
   /** Get live action prices, terms and launch chains. */ async capabilities() { return (await this.request('/requests/capabilities',{headers:this.headers()})).body; }
@@ -42,10 +46,10 @@ export class ImdClient {
     if(!accepted||!q||!qp||!cp)throw new Error('payment terms missing; refusing to sign');
     const same=(a,b)=>eqAddress(a.asset,b.asset)&&eqAddress(a.payTo,b.payTo)&&String(a.amount)===String(b.amount);
     const originallyQuoted=quote?.quote||quote?.order?.quote;
-    if(originallyQuoted?.payment&&(!same(qp,paymentOf(originallyQuoted))||originallyQuoted.action!==q.action||String(originallyQuoted.expiresAt)!==String(q.expiresAt)))throw new Error('challenge quote differs from the original quote');
+    if(originallyQuoted&&(!eqAddress(originallyQuoted.payTo,qp.payTo)||String(originallyQuoted.amount)!==String(qp.amount)||originallyQuoted.action!==q.action||String(originallyQuoted.expiresAt)!==String(q.expiresAt)))throw new Error('challenge quote differs from the original quote');
     if(!same(accepted,qp)||!same(accepted,cp)||!eqAddress(accepted.asset,IMD_TOKEN))throw new Error('challenge payment terms differ from quote or capabilities');
-    const amount=BigInt(accepted.amount);if(amount>this.maxPerRequest)throw new Error('per-request IMD spending cap exceeded');
-    const key=new Date().toISOString().slice(0,10), spent=daily.get(key)||0n;if(spent+amount>this.maxPerDay)throw new Error('daily IMD spending cap exceeded');
+    if(typeof accepted.amount!=='string'||!/^[0-9]+$/.test(accepted.amount))throw new Error('invalid payment amount');const amount=BigInt(accepted.amount);if(amount<=0n||amount>=(1n<<256n))throw new Error('invalid payment amount');if(amount>this.maxPerRequest)throw new Error('per-request IMD spending cap exceeded');
+    const key=new Date().toISOString().slice(0,10);
     return {accepted,q,amount,key};
   }
   /** Challenge, validate and (only with execute:true) sign and submit a payment. A viem account is accepted directly as signer. @param {string|{id:string}} order @param {Signer} [signer] @param {{execute?:boolean}} [options] */
@@ -54,13 +58,14 @@ export class ImdClient {
     if(!options.execute)return {dryRun:true,order:{id},message:'Payment not signed. Pass execute:true to sign and submit.'};
     if(!signer)throw new Error('a viem-compatible signer is required for execute:true');
     const terms=this.verifyTerms(first.body,this.quotes.get(id)||await this.status(id),await this.capabilities());const ch=first.body;
+    const day=terms.key;let release;const previous=reservationQueue;reservationQueue=new Promise(resolve=>{release=resolve;});await previous;try{let ledger={};try{ledger=JSON.parse(await readFile(this.spendFile,'utf8'));}catch{}const spent=BigInt(ledger[day]||daily.get(day)||0);if(spent+terms.amount>this.maxPerDay)throw new Error('daily IMD spending cap exceeded');ledger[day]=(spent+terms.amount).toString();await mkdir(dirname(this.spendFile),{recursive:true});await writeFile(this.spendFile,JSON.stringify(ledger),{mode:0o600});daily.set(day,spent+terms.amount);}finally{release();}
     const expiry=BigInt(terms.q.expiresAt), now=BigInt(Math.floor(Date.now()/1000)), deadline=expiry-5n;if(deadline<=now)throw new Error('quote expires too soon to sign safely');
     const nonce=BigInt(`0x${randomBytes(32).toString('hex')}`);
     const authorization={from:signer.address,permitted:{token:terms.accepted.asset,amount:String(terms.amount)},spender:X402_PERMIT2_PROXY,nonce:String(nonce),deadline:String(deadline),witness:{to:terms.accepted.payTo,validAfter:'0'}};
     const permit={domain:{name:'Permit2',chainId:1,verifyingContract:PERMIT2},primaryType:'PermitWitnessTransferFrom',types:{PermitWitnessTransferFrom:[{name:'permitted',type:'TokenPermissions'},{name:'spender',type:'address'},{name:'nonce',type:'uint256'},{name:'deadline',type:'uint256'},{name:'witness',type:'Witness'}],TokenPermissions:[{name:'token',type:'address'},{name:'amount',type:'uint256'}],Witness:[{name:'to',type:'address'},{name:'validAfter',type:'uint256'}]},message:{permitted:{token:terms.accepted.asset,amount:terms.amount},spender:X402_PERMIT2_PROXY,nonce,deadline,witness:{to:terms.accepted.payTo,validAfter:0n}}};
-    const signature=await signer.signTypedData(permit);const payment={x402Version:2,resource:ch.resource,accepted:terms.accepted,payload:{signature,permit2Authorization:authorization}};
+    let signature;try{signature=await signer.signTypedData(permit);}catch(error){throw error;}const payment={x402Version:2,resource:ch.resource,accepted:terms.accepted,payload:{signature,permit2Authorization:authorization}};
     const approval={domain:{name:'IdentityMD Paid Action',version:'1',chainId:1},primaryType:'QuoteApproval',types:{QuoteApproval:[{name:'resource',type:'string'},{name:'requesterScopeHash',type:'bytes32'},{name:'quoteId',type:'string'},{name:'quoteHash',type:'bytes32'},{name:'paymentHash',type:'bytes32'},{name:'action',type:'string'},{name:'asset',type:'address'},{name:'amount',type:'uint256'},{name:'payTo',type:'address'},{name:'expiresAt',type:'uint256'}]},message:{resource:ch.resourceUrl,requesterScopeHash:b32(ch.requesterScopeHash),quoteId:terms.q.id,quoteHash:b32(terms.q.quoteHash),paymentHash:toHex(sha256(canon(payment))),action:terms.q.action,asset:terms.q.payment.asset,amount:BigInt(terms.q.payment.amount),payTo:terms.q.payment.payTo,expiresAt:BigInt(terms.q.expiresAt)}};
-    const quoteSignature=await signer.signTypedData(approval);const response=await this.request(`/requests/${encodeURIComponent(id)}/submit`,{method:'POST',headers:{...this.headers(true),'PAYMENT-SIGNATURE':Buffer.from(canon(payment)).toString('base64')},body:JSON.stringify({quoteSignature})},[200,202]);daily.set(terms.key,(daily.get(terms.key)||0n)+terms.amount);return response.body;
+    const quoteSignature=await signer.signTypedData(approval);const response=await this.request(`/requests/${encodeURIComponent(id)}/submit`,{method:'POST',headers:{...this.headers(true),'PAYMENT-SIGNATURE':Buffer.from(canon(payment)).toString('base64')},body:JSON.stringify({quoteSignature})},[200,202]);return response.body;
   }
 }
 /** Create an IMD client. @param {ImdClientOptions} [options] */
