@@ -1,0 +1,17 @@
+{
+  "name": "imd-sdk",
+  "version": "0.1.0",
+  "description": "Typed Node client and cautious CLI for IMD paid requests",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": { "imd": "dist/cli.js" },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "license": "MIT"
+}
