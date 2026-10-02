@@ -2,6 +2,20 @@
 
 > Experimental, commissioned as a test of the IMD swarm. It may not work as described. Read the code, start with small amounts, no warranty.
 
+## Unreleased — typed live responses and signer documentation
+
+- Replaced every `Promise<any>` client result with exported API response interfaces, including
+  `Capabilities`, `CheckResult`, `Order`, `OrderStatus`, `Challenge`, `Job`, and `Schedule`.
+  Saved live OpenAPI, capabilities, check, import, job, and schedules responses now back a drift
+  test for every required declared response field.
+- Added `examples/viem-signer.mjs` and README guidance that a user-installed viem
+  `privateKeyToAccount` is the recommended signer. `LocalPrivateKeySigner` remains the built-in
+  default.
+- Reformatted `src/index.js`, `src/crypto.js`, and `src/cli.js` for readability without changing
+  behavior; source lines are kept at 120 characters or fewer.
+- The `package.json` exports map requested by audit finding 10 still cannot be added because
+  `package.json` is protected on this platform.
+
 ## 0.1.1 (unreleased) — fixes for the audit of 91407cb
 
 Audit: https://api.imd.fun/jobs/ae3c9745-7363-4bd2-bfaf-dc8944649cd8/report.md. Each finding has a regression test in `test/audit-findings.test.mjs` that fails on 91407cb and passes now. `dist/` is a fresh copy of `src/`. The public API, the CLI commands, the dry-run default and the 0.5 IMD per-request and per-day caps are unchanged.

@@ -16,6 +16,8 @@ imd quote request.json --json
 ```
 
 `prepare` runs the committed dependency-free build on GitHub installs. Set `IMD_API` only to point at a compatible test server; production defaults to `https://api.imd.fun`.
+The `package.json` exports map from audit finding 10 cannot be added on this platform because
+`package.json` is protected.
 
 To pay, keep the quote’s order id and bearer token. The default below is a dry run: it may obtain a 402 challenge but never creates a signature. Payment requires an explicit `--execute`, and reads the private key only from `IMD_PRIVATE_KEY`; the key is never logged, persisted, or sent to the API.
 
@@ -45,7 +47,14 @@ imd schedules <owner> [--json]
 
 ## Library
 
-All exports have declarations in `dist/index.d.ts`; a viem account works directly as the `Signer` because it has `address` and `signTypedData`.
+All exports have declarations in `dist/index.d.ts`.
+
+### Recommended signer: a viem account
+
+Install viem in your application (`npm i viem`); it is deliberately not a dependency of this
+package. A `privateKeyToAccount` account works directly as the recommended `Signer` because it
+has `address` and `signTypedData`. See
+[`examples/viem-signer.mjs`](examples/viem-signer.mjs).
 
 ```ts
 import { createClient } from 'imd-sdk';
@@ -65,7 +74,7 @@ const report = await client.jobReport(aJob.id);
 const mine = await client.schedules('0xyour_wallet');
 ```
 
-`LocalPrivateKeySigner` is available when viem is not in your application:
+`LocalPrivateKeySigner` remains the built-in default when viem is not in your application:
 
 ```ts
 import { LocalPrivateKeySigner, createClient } from 'imd-sdk';
