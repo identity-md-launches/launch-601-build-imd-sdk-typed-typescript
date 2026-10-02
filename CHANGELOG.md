@@ -2,6 +2,20 @@
 
 > Experimental, commissioned as a test of the IMD swarm. It may not work as described. Read the code, start with small amounts, no warranty.
 
+## Unreleased — dry-run example and schedule.create check type
+
+1. **Safety — the viem example paid when run as written.** `examples/viem-signer.mjs` called
+   `pay(..., { execute: true })`. It now passes `execute` only when `IMD_EXECUTE=1` is set in the
+   environment, prints a warning naming the order before paying, and otherwise performs the dry
+   run. The README signer section says so. No payment, retry or cap behaviour changed.
+2. **Types — `CheckResult` did not match a live `schedule.create` check.** The live
+   `POST /requests/check` response for `schedule.create` has no `kind`, `plan`, `facts` or `judged`
+   and returns `unitAmount`, `runs`, `amount` and `terms` instead. In `src/index.d.ts` (and
+   `dist/`) `CheckResult.kind`, `plan`, `facts` and `judged` are now optional, and optional
+   `unitAmount: string`, `runs: number`, `amount: string` and `terms: string` were added. The
+   live body (7 runs, captured 2026-10-02 from https://api.imd.fun) is saved as
+   `test/fixtures/live/check-schedule-create.json` and checked by the drift test.
+
 ## Unreleased — typed live responses and signer documentation
 
 - Replaced every `Promise<any>` client result with exported API response interfaces, including

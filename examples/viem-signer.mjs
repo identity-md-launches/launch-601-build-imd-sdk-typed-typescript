@@ -16,6 +16,14 @@ const quote = await client.quote("job.open", {
   template: "single",
 });
 
-// Omit execute for the safe dry run. Set it only when you intend to sign and submit payment.
-const result = await client.pay(quote.order, signer, { execute: true });
+// Dry run by default: nothing is signed or paid. Set IMD_EXECUTE=1 only when you intend to pay.
+const execute = process.env.IMD_EXECUTE === "1";
+
+if (execute) {
+  console.warn(
+    `WARNING: IMD_EXECUTE=1 is set. Signing and submitting a real IMD payment for order ${quote.order.id}.`,
+  );
+}
+
+const result = await client.pay(quote.order, signer, { execute });
 console.log(result);

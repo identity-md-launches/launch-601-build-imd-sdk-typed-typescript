@@ -23,9 +23,10 @@ function hasFields(value, fields, name) {
 }
 
 test('saved live bodies contain every declared required response field', async () => {
-  const [capabilities, check, imported, job, schedules] = await Promise.all([
+  const [capabilities, check, scheduleCheck, imported, job, schedules] = await Promise.all([
     live('capabilities'),
     live('check'),
+    live('check-schedule-create'),
     live('import'),
     live('job'),
     live('schedules'),
@@ -48,6 +49,13 @@ test('saved live bodies contain every declared required response field', async (
   }
   for (const message of [...check.blockers, ...check.suggestions]) {
     hasFields(message, requiredFields('CheckMessage'), 'check message');
+  }
+  hasFields(scheduleCheck, requiredFields('CheckResult'), 'check schedule.create');
+  hasFields(scheduleCheck, ['unitAmount', 'runs', 'amount', 'terms'], 'check schedule.create');
+  assert.equal(scheduleCheck.runs, 7);
+  assert.equal(BigInt(scheduleCheck.amount), BigInt(scheduleCheck.unitAmount) * 7n);
+  for (const message of [...scheduleCheck.blockers, ...scheduleCheck.suggestions]) {
+    hasFields(message, requiredFields('CheckMessage'), 'check schedule.create message');
   }
   hasFields(imported, requiredFields('ImportResult'), 'import');
   hasFields(imported.source, requiredFields('ImportSource'), 'import.source');

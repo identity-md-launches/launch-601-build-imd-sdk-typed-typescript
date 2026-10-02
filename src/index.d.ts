@@ -255,12 +255,16 @@ export interface CheckMessage {
 
 export interface CheckResult {
   action: string;
-  kind: string;
-  plan: unknown[];
-  facts: CheckFact[];
-  judged: boolean;
+  kind?: string;
+  plan?: unknown[];
+  facts?: CheckFact[];
+  judged?: boolean;
   blockers: CheckMessage[];
   suggestions: CheckMessage[];
+  unitAmount?: string;
+  runs?: number;
+  amount?: string;
+  terms?: string;
 }
 
 export interface ImportSource {

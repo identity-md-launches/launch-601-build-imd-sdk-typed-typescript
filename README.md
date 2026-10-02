@@ -54,7 +54,9 @@ All exports have declarations in `dist/index.d.ts`.
 Install viem in your application (`npm i viem`); it is deliberately not a dependency of this
 package. A `privateKeyToAccount` account works directly as the recommended `Signer` because it
 has `address` and `signTypedData`. See
-[`examples/viem-signer.mjs`](examples/viem-signer.mjs).
+[`examples/viem-signer.mjs`](examples/viem-signer.mjs). The example is a dry run by default: it
+quotes and calls `pay()` without `execute`, so nothing is signed or paid. It makes a real IMD
+payment only when you set `IMD_EXECUTE=1` in the environment, and prints a warning before it pays.
 
 ```ts
 import { createClient } from 'imd-sdk';
